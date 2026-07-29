@@ -443,6 +443,7 @@ function speakEnglish(text){
 const AZURE_SPEECH_KEY = "2YOi3mQGa30skQ1ukJe2GAurLeXkqwGRnFJIo0i8ZssXijdQS243JQQJ99CGAC3pKaRXJ3w3AAAYACOGw5bp";
 const AZURE_SPEECH_REGION = "eastasia";
 let azureSynthesizer = null;
+let azureIsSpeaking = false;
 
 async function getAzureSynthesizer(){
   await ensureAzureSpeech();
@@ -456,15 +457,20 @@ async function getAzureSynthesizer(){
 }
 
 async function speakMongolian(className, distanceText){
+  // skip if a Mongolian phrase is still playing — prevents overlapping/stacked audio
+  // that made it sound like it was "talking too much"
+  if(azureIsSpeaking) return;
   const word = MN_WORDS[className] || className;
-  const text = distanceText ? `${word}, ойролцоогоор ${distanceText}` : word;
+  const text = distanceText ? `${word}, ${distanceText}` : word;
   try{
+    azureIsSpeaking = true;
     statusText.textContent = 'loading Mongolian voice…';
     const synth = await getAzureSynthesizer();
     statusText.textContent = 'speaking…';
     synth.speakTextAsync(
       text,
       result => {
+        azureIsSpeaking = false;
         if(result.reason === SpeechSDK.ResultReason.SynthesizingAudioCompleted){
           statusText.textContent = running ? 'live' : 'stopped';
         } else {
@@ -472,11 +478,13 @@ async function speakMongolian(className, distanceText){
         }
       },
       error => {
+        azureIsSpeaking = false;
         statusText.textContent = 'Mongolian voice failed: ' + error;
         console.error(error);
       }
     );
   }catch(e){
+    azureIsSpeaking = false;
     statusText.textContent = 'Mongolian voice unavailable: ' + e.message;
     console.error(e);
   }
@@ -689,8 +697,6 @@ readBtn.addEventListener('click', async () => {
     snap.width = video.videoWidth;
     snap.height = video.videoHeight;
     const sctx = snap.getContext('2d');
-    sctx.translate(snap.width, 0);
-    sctx.scale(-1,1);
     sctx.drawImage(video, 0, 0, snap.width, snap.height);
 
     const lang = langSelect.value; // 'en' or 'mn'
@@ -752,8 +758,6 @@ askClaudeBtn.addEventListener('click', async () => {
     snap.width = video.videoWidth;
     snap.height = video.videoHeight;
     const sctx = snap.getContext('2d');
-    sctx.translate(snap.width, 0);
-    sctx.scale(-1,1);
     sctx.drawImage(video, 0, 0, snap.width, snap.height);
     const dataUrl = snap.toDataURL('image/jpeg', 0.85);
     const base64Data = dataUrl.split(',')[1];
