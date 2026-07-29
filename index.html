@@ -44,6 +44,35 @@
     pointer-events:none;
   }
   video.mirrored, canvas.mirrored{ transform:scaleX(-1); }
+  canvas{ object-fit:cover; }
+  #pastePanel{
+    position:absolute;
+    inset:0;
+    z-index:30;
+    background:var(--ink);
+    display:flex;
+    flex-direction:column;
+    gap:12px;
+    padding:20px;
+  }
+  #pastePanel h2{
+    font-family:var(--mono);
+    font-size:13px;
+    letter-spacing:0.12em;
+    text-transform:uppercase;
+    margin:0;
+  }
+  #pasteText{
+    flex:1;
+    width:100%;
+    background:rgba(255,255,255,0.06);
+    border:2px solid var(--paper);
+    color:var(--paper);
+    font-family:var(--sans);
+    font-size:16px;
+    padding:12px;
+    resize:none;
+  }
   .scanline{
     position:absolute;
     inset:0;
@@ -272,6 +301,10 @@
     <div class="controls">
       <button id="readBtn" class="primary hidden">Capture &amp; Read</button>
     </div>
+    <div class="controls hidden" id="readExtraRow">
+      <button id="pasteModeBtn">Type / paste text</button>
+      <button id="clearSelBtn">Clear area</button>
+    </div>
     <div class="toggle-row hidden" id="mirrorRow">
       <span>FIX BACKWARDS TEXT</span>
       <input type="checkbox" id="mirrorFixCheckbox">
@@ -283,6 +316,15 @@
       <button id="askClaudeBtn" class="primary">Check for danger</button>
     </div>
   </footer>
+
+  <div id="pastePanel" class="hidden">
+    <h2>Type or paste text</h2>
+    <textarea id="pasteText" placeholder="Paste text here, then tap Read aloud."></textarea>
+    <div class="controls">
+      <button id="pasteReadBtn" class="primary">Read aloud</button>
+      <button id="pasteCloseBtn">Close</button>
+    </div>
+  </div>
 
   <div id="boot">
     <h1>See &amp; Say</h1>
@@ -670,6 +712,9 @@ const readBtn = document.getElementById('readBtn');
 const calibrateBtnEl = document.getElementById('calibrateBtn');
 const mirrorRow = document.getElementById('mirrorRow');
 const mirrorFixCheckbox = document.getElementById('mirrorFixCheckbox');
+const readExtraRow = document.getElementById('readExtraRow');
+const pastePanel = document.getElementById('pastePanel');
+const pasteTextArea = document.getElementById('pasteText');
 
 modeToggleBtn.addEventListener('click', () => {
   if(currentMode === 'detect'){
@@ -681,6 +726,7 @@ modeToggleBtn.addEventListener('click', () => {
     askClaudeBtn.classList.add('hidden');
     readBtn.classList.remove('hidden');
     mirrorRow.classList.remove('hidden');
+    readExtraRow.classList.remove('hidden');
     running = false;
     if(rafId) cancelAnimationFrame(rafId);
     labelText.classList.remove('show');
@@ -696,21 +742,85 @@ modeToggleBtn.addEventListener('click', () => {
     askClaudeBtn.classList.remove('hidden');
     readBtn.classList.add('hidden');
     mirrorRow.classList.add('hidden');
+    readExtraRow.classList.add('hidden');
+    selection = null;
     statusText.textContent = running ? 'live' : 'stopped';
   }
 });
 
-// Capture the current frame at full sensor resolution.
+// ---------- Reading region selection ----------
+// Drag a box across the preview to tell it which part of the page to read.
+let selection = null; // {x,y,w,h} in video pixel coords
+let dragStart = null;
+
+function clientToVideo(clientX, clientY){
+  const rect = video.getBoundingClientRect();
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if(!vw || !vh) return {x:0, y:0};
+  const scale = Math.max(rect.width / vw, rect.height / vh); // object-fit: cover
+  const offX = rect.left + (rect.width - vw*scale)/2;
+  const offY = rect.top + (rect.height - vh*scale)/2;
+  let x = (clientX - offX) / scale;
+  let y = (clientY - offY) / scale;
+  if(isMirrored) x = vw - x;
+  return {
+    x: Math.max(0, Math.min(vw, x)),
+    y: Math.max(0, Math.min(vh, y))
+  };
+}
+
+function drawSelection(){
+  ctx.clearRect(0, 0, overlay.width, overlay.height);
+  if(!selection) return;
+  ctx.strokeStyle = '#ff5a2d';
+  ctx.lineWidth = 4;
+  ctx.setLineDash([12, 8]);
+  ctx.strokeRect(selection.x, selection.y, selection.w, selection.h);
+  ctx.setLineDash([]);
+}
+
+const appEl = document.getElementById('app');
+appEl.addEventListener('pointerdown', e => {
+  if(currentMode !== 'read' || !stream) return;
+  if(e.target.closest('footer') || e.target.closest('#pastePanel')) return;
+  dragStart = clientToVideo(e.clientX, e.clientY);
+});
+appEl.addEventListener('pointermove', e => {
+  if(!dragStart || currentMode !== 'read') return;
+  const p = clientToVideo(e.clientX, e.clientY);
+  selection = {
+    x: Math.min(dragStart.x, p.x),
+    y: Math.min(dragStart.y, p.y),
+    w: Math.abs(p.x - dragStart.x),
+    h: Math.abs(p.y - dragStart.y)
+  };
+  drawSelection();
+});
+appEl.addEventListener('pointerup', () => {
+  if(!dragStart) return;
+  dragStart = null;
+  // A tap (not a drag) clears the selection.
+  if(selection && (selection.w < 40 || selection.h < 40)){
+    selection = null;
+    drawSelection();
+    statusText.textContent = 'reading whole view';
+  } else if(selection){
+    statusText.textContent = 'area selected';
+  }
+});
+
+// Capture the current frame, cropped to the selected area if there is one.
 function captureFrame(){
+  const sel = selection || {x:0, y:0, w:video.videoWidth, h:video.videoHeight};
   const snap = document.createElement('canvas');
-  snap.width = video.videoWidth;
-  snap.height = video.videoHeight;
+  snap.width = Math.round(sel.w);
+  snap.height = Math.round(sel.h);
   const sctx = snap.getContext('2d');
   if(mirrorFixCheckbox.checked){
     sctx.translate(snap.width, 0);
     sctx.scale(-1,1);
   }
-  sctx.drawImage(video, 0, 0, snap.width, snap.height);
+  sctx.drawImage(video, sel.x, sel.y, sel.w, sel.h, 0, 0, snap.width, snap.height);
   return snap;
 }
 
@@ -830,6 +940,29 @@ readBtn.addEventListener('click', async () => {
     readBtn.disabled = false;
     readBtn.textContent = 'Capture & Read';
   }
+});
+
+// ---------- Paste / typed text reading (no camera, 100% accurate) ----------
+document.getElementById('pasteModeBtn').addEventListener('click', () => {
+  pastePanel.classList.remove('hidden');
+  pasteTextArea.focus();
+});
+document.getElementById('pasteCloseBtn').addEventListener('click', () => {
+  pastePanel.classList.add('hidden');
+});
+document.getElementById('pasteReadBtn').addEventListener('click', () => {
+  const text = pasteTextArea.value.trim();
+  if(!text){ pasteTextArea.focus(); return; }
+  if(langSelect.value === 'mn'){
+    speakMongolian(text, '');
+  } else {
+    speakEnglish(text);
+  }
+});
+document.getElementById('clearSelBtn').addEventListener('click', () => {
+  selection = null;
+  drawSelection();
+  statusText.textContent = 'reading whole view';
 });
 
 document.getElementById('calibrateBtn').addEventListener('click', async () => {
