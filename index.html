@@ -526,8 +526,8 @@ async function startCamera(deviceId){
   }
   const constraints = {
     video: deviceId
-      ? { deviceId: { exact: deviceId } }
-      : { facingMode: { ideal: 'environment' } },
+      ? { deviceId: { exact: deviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+      : { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
     audio: false
   };
   stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -700,9 +700,87 @@ modeToggleBtn.addEventListener('click', () => {
   }
 });
 
+// Capture the current frame at full sensor resolution.
+function captureFrame(){
+  const snap = document.createElement('canvas');
+  snap.width = video.videoWidth;
+  snap.height = video.videoHeight;
+  const sctx = snap.getContext('2d');
+  if(mirrorFixCheckbox.checked){
+    sctx.translate(snap.width, 0);
+    sctx.scale(-1,1);
+  }
+  sctx.drawImage(video, 0, 0, snap.width, snap.height);
+  return snap;
+}
+
+// Grayscale + contrast stretch. Sharpens letter edges, which Tesseract depends on.
+function preprocessForOCR(srcCanvas){
+  const out = document.createElement('canvas');
+  const scale = srcCanvas.width < 1200 ? 2 : 1; // upscale small frames
+  out.width = srcCanvas.width * scale;
+  out.height = srcCanvas.height * scale;
+  const octx = out.getContext('2d');
+  octx.drawImage(srcCanvas, 0, 0, out.width, out.height);
+  const img = octx.getImageData(0, 0, out.width, out.height);
+  const d = img.data;
+  let min = 255, max = 0;
+  for(let i = 0; i < d.length; i += 4){
+    const g = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+    d[i] = d[i+1] = d[i+2] = g;
+    if(g < min) min = g;
+    if(g > max) max = g;
+  }
+  const range = Math.max(1, max - min);
+  for(let i = 0; i < d.length; i += 4){
+    const v = Math.max(0, Math.min(255, ((d[i] - min) / range) * 255));
+    d[i] = d[i+1] = d[i+2] = v;
+  }
+  octx.putImageData(img, 0, 0);
+  return out;
+}
+
+// Primary reader: Claude vision. Handles curved pages, small type, poor light,
+// and Mongolian Cyrillic far better than Tesseract. Needs internet.
+async function readWithClaude(canvas, lang){
+  const base64Data = canvas.toDataURL('image/jpeg', 0.9).split(',')[1];
+  const langName = lang === 'mn' ? 'Mongolian (Cyrillic)' : 'English';
+  const prompt = `Transcribe the ${langName} text in this photo of a page, exactly as written. Output only the transcribed text with no commentary, no translation, no markdown. Preserve line breaks. If there is no readable text, output exactly: NO_TEXT`;
+
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 1500,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "image", source: { type: "base64", media_type: "image/jpeg", data: base64Data } },
+          { type: "text", text: prompt }
+        ]
+      }]
+    })
+  });
+  if(!response.ok) throw new Error('HTTP ' + response.status);
+  const data = await response.json();
+  const text = (data.content || []).map(b => b.text || '').join(' ').trim();
+  if(text === 'NO_TEXT') return '';
+  return text;
+}
+
+// Fallback reader: Tesseract, fully offline but much less accurate.
+async function readWithTesseract(canvas, lang){
+  await ensureOCR();
+  // Mongolian Cyrillic = Russian alphabet + Ө/Ү, so pairing 'mon' with 'rus'
+  // is far more accurate than 'mon' alone.
+  const tessLang = lang === 'mn' ? 'mon+rus' : 'eng';
+  const result = await Tesseract.recognize(preprocessForOCR(canvas), tessLang);
+  return (result.data.text || '').trim();
+}
+
 readBtn.addEventListener('click', async () => {
   if(!stream){
-    // start camera if not already running (reading mode doesn't need the detection model)
     try{
       await startCamera(cameraSelect.value);
     }catch(e){
@@ -712,26 +790,21 @@ readBtn.addEventListener('click', async () => {
   }
   readBtn.disabled = true;
   readBtn.textContent = 'Reading…';
-  statusText.textContent = 'loading reading library…';
+  const lang = langSelect.value; // 'en' or 'mn'
   try{
-    await ensureOCR();
-    const snap = document.createElement('canvas');
-    snap.width = video.videoWidth;
-    snap.height = video.videoHeight;
-    const sctx = snap.getContext('2d');
-    if(mirrorFixCheckbox.checked){
-      sctx.translate(snap.width, 0);
-      sctx.scale(-1,1);
-    }
-    sctx.drawImage(video, 0, 0, snap.width, snap.height);
+    const snap = captureFrame();
+    let text = '';
+    let usedFallback = false;
 
-    const lang = langSelect.value; // 'en' or 'mn'
-    // Mongolian Cyrillic = Russian alphabet + Ө/Ү, so pairing 'mon' with 'rus'
-    // is far more accurate than 'mon' alone.
-    const tessLang = lang === 'mn' ? 'mon+rus' : 'eng';
-    statusText.textContent = lang === 'mn' ? 'reading Mongolian text…' : 'reading English text…';
-    const result = await Tesseract.recognize(snap, tessLang);
-    const text = (result.data.text || '').trim();
+    try{
+      statusText.textContent = 'reading page…';
+      text = await readWithClaude(snap, lang);
+    }catch(e){
+      console.warn('Claude reading failed, falling back to offline reader:', e);
+      usedFallback = true;
+      statusText.textContent = 'offline reader…';
+      text = await readWithTesseract(snap, lang);
+    }
 
     if(!text){
       labelText.textContent = 'No text found';
@@ -741,11 +814,10 @@ readBtn.addEventListener('click', async () => {
     } else {
       labelText.textContent = text.length > 80 ? text.slice(0,80)+'…' : text;
       labelText.classList.add('show');
-      confText.textContent = lang === 'mn' ? 'Монгол текст' : 'English text';
+      confText.textContent = (lang === 'mn' ? 'Монгол текст' : 'English text') + (usedFallback ? ' · offline' : '');
       confText.classList.add('show');
       if(lang === 'mn'){
         speakMongolian(text, '');
-        statusText.textContent = 'Mongolian text found — reads aloud if voice available';
       } else {
         speakEnglish(text);
         statusText.textContent = 'ready to read';
