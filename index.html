@@ -273,6 +273,10 @@
     <div class="controls">
       <button id="readBtn" class="primary hidden">Capture &amp; Read</button>
     </div>
+    <div class="toggle-row hidden" id="mirrorRow">
+      <span>FIX BACKWARDS TEXT</span>
+      <input type="checkbox" id="mirrorFixCheckbox">
+    </div>
     <div class="controls">
       <button id="calibrateBtn">Calibrate distance</button>
     </div>
@@ -650,6 +654,8 @@ let currentMode = 'detect'; // or 'read'
 const modeToggleBtn = document.getElementById('modeToggleBtn');
 const readBtn = document.getElementById('readBtn');
 const calibrateBtnEl = document.getElementById('calibrateBtn');
+const mirrorRow = document.getElementById('mirrorRow');
+const mirrorFixCheckbox = document.getElementById('mirrorFixCheckbox');
 
 modeToggleBtn.addEventListener('click', () => {
   if(currentMode === 'detect'){
@@ -660,6 +666,7 @@ modeToggleBtn.addEventListener('click', () => {
     calibrateBtnEl.classList.add('hidden');
     askClaudeBtn.classList.add('hidden');
     readBtn.classList.remove('hidden');
+    mirrorRow.classList.remove('hidden');
     running = false;
     if(rafId) cancelAnimationFrame(rafId);
     labelText.classList.remove('show');
@@ -674,6 +681,7 @@ modeToggleBtn.addEventListener('click', () => {
     calibrateBtnEl.classList.remove('hidden');
     askClaudeBtn.classList.remove('hidden');
     readBtn.classList.add('hidden');
+    mirrorRow.classList.add('hidden');
     statusText.textContent = running ? 'live' : 'stopped';
   }
 });
@@ -697,6 +705,10 @@ readBtn.addEventListener('click', async () => {
     snap.width = video.videoWidth;
     snap.height = video.videoHeight;
     const sctx = snap.getContext('2d');
+    if(mirrorFixCheckbox.checked){
+      sctx.translate(snap.width, 0);
+      sctx.scale(-1,1);
+    }
     sctx.drawImage(video, 0, 0, snap.width, snap.height);
 
     const lang = langSelect.value; // 'en' or 'mn'
